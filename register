@@ -1,0 +1,607 @@
+#!/usr/bin/env python3
+
+# urwid-based check register program.
+
+
+import urwid
+import string, time, sys, os
+
+
+# cash_string()-- Internally, money is an integer number of cents.
+# Convert the integer to a cash string here.
+
+def cash_string(cents):
+    if cents is None:
+        return ''
+
+    if cents < 0:
+        negative = True
+        cents = -cents
+
+    else:
+        negative = False
+        pass
+
+    text = '%03d' % cents
+
+    head = text[:-2]
+    tail = '.' + text[-2:]
+
+    while len(head) > 3:
+        tail = ',' + head[-3:] + tail
+        head = head[:-3]
+        pass
+
+    text = head + tail
+    if negative:
+        text = '-' + text
+        pass
+
+    return text
+
+
+# build_row()-- Build a row of the transaction register with the
+# passed widgets.  Returns a list appropriate for urwid.Columns().
+
+def build_row(date, desc, flag, payment, credit, balance):
+    return [ (6, date), ('weight', 1, desc), (6, flag),
+             (10, payment), (10, credit), (12, balance) ]
+
+
+
+# edit_lose_focus()-- Return True if the edit widget is about to lose
+# the focus.
+
+def edit_lose_focus(widget, key):
+
+    return key == 'up' or key == 'down' or key == 'enter' or \
+           (key == 'left' and widget.edit_pos == 0) or \
+           (key == 'right' and widget.edit_pos == len(widget.edit_text))
+
+
+# row_date()-- The date is an integer number of days since the Epoch.
+# The convention is that the value member is always the number of
+# days, updated when the widget loses focus.
+#
+# Time is always nasty to deal with, and even this simple application
+# does not disappoint.  We want to get the current day/month in the
+# current time zone, not GMT.  The epoch is zero at midnight in GMT,
+# not the time zone we are in, so we define our own epoch and count
+# days from there.  If there was a function that converted a
+# time_struct to seconds, that would be great, but mktime() converts
+# to local time.
+
+class row_date0(urwid.Edit):
+
+    def __init__(self, parent, day):
+        super().__init__(multiline=False)
+        self.parent = parent
+
+        self.epoch = self.tlist_to_seconds([ 1970, 1, 1,  0, 0, 0,  0, 0, -1 ])
+
+        if day is None:
+            t = time.localtime()
+            t = [ t.tm_year, t.tm_mon, t.tm_mday,  12, 0, 0,  0, 0, -1 ]
+            day = int((self.tlist_to_seconds(t) - self.epoch) / 86400)
+            pass
+
+        self.set_day(day)
+        return
+
+
+# set_day()-- Given a day number, make this the current day, trying to
+# avoid DST and leap second issues.
+
+    def set_day(self, value):
+        t = time.localtime(self.epoch + 86400*value + 7200)
+        self.edit_text = '%d/%d' % ( t.tm_mon, t.tm_mday )
+        self.value = value
+        return
+
+
+    def keypress(self, size, key):
+        if edit_lose_focus(self, key):
+            try:
+                self.format_date()
+
+            except ValueError:
+                self.set_day(self.value)   # Reset the current day text
+                pass
+
+            pass
+
+        if key in '0123456789/' or key in \
+               [ 'enter', 'left', 'right', 'up', 'down', 'backspace']:
+            return super().keypress(size, key)
+
+        return key
+
+
+    def format_date(self):
+        m, d = [ int(x) for x in self.edit_text.strip().split('/') ]
+        if m < 1 or m > 12:
+            raise ValueError
+
+# Years are taken as the year nearest to today.  So "12/10" on
+# 2/8/2019 is 12/10/18, and "4/1" is 4/1/2019.
+
+        now = time.localtime()
+
+        if now.tm_mon > 6:
+            y = now.tm_year + 1 if m < now.tm_mon - 6 else now.tm_year
+        else:
+            y = now.tm_year - 1 if m > now.tm_mon + 6 else now.tm_year
+            pass
+
+# Validate the month/day combination
+
+        max_day = [ None, 31, None, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 ]
+        max_day[2] = 29 if y % 4 == 0 else 28   # Ignore century leap year rules!
+
+        if d > max_day[m]:
+            raise ValueError
+
+        t = self.tlist_to_seconds([ y, m, d, 12, 0, 0, 0, 0, -1 ])
+        self.set_day(int((t - self.epoch) / 86400))
+        return
+
+
+    def tlist_to_seconds(self, time_list):
+        return time.mktime(time.struct_time(time_list))
+
+    pass
+
+
+
+class row_date(urwid.Edit):
+
+    def __init__(self, day):
+        super().__init__('', day, multiline=False)
+        return
+
+
+    def keypress(self, size, key):
+        if edit_lose_focus(self, key):
+            text = self.edit_text.strip()
+            text = text.replace(' ', '')
+            self.edit_text = text
+            pass
+
+        if key in '0123456789/' or key in \
+               [ 'enter', 'left', 'right', 'up', 'down', 'backspace']:
+            return super().keypress(size, key)
+
+        return key
+
+    pass
+
+
+
+
+
+
+
+
+class row_desc(urwid.Edit):
+    def __init__(self, parent, desc):
+        self.parent = parent
+        super().__init__(edit_text=desc)
+        return
+
+    pass
+
+
+class row_flag(urwid.CheckBox):
+    def __init__(self, parent):
+        self.parent = parent
+        super().__init__('')
+        return
+
+    pass
+
+
+
+# cash_entry()-- This widget is an urwid.Edit class specialized for
+# entering dollar amounts.
+
+class cash_entry(urwid.Edit):
+    value = None
+
+    def keypress(self, size, key):
+        if key == '.' and '.' not in self.edit_text:
+            return super().keypress(size, key)  # Allow a single decimal point
+
+        if edit_lose_focus(self, key):
+            self.format_cash()
+            pass
+
+        if key in '0123456789,' or key in \
+               [ 'enter', 'left', 'right', 'up', 'down', 'backspace']:
+            return super().keypress(size, key)
+
+        return key
+
+
+# format_cash()-- Format the text value in the widget.  We come here
+# when we're about to lose the focus.  Also updates the value member.
+
+    def format_cash(self):
+        text = self.edit_text.replace(',', '').strip()
+        if text == '':
+            self.value = None
+            return
+
+        index = text.find('.')
+        if index == -1:
+            cents = 100 * int(text)  # No dp, assume full dollars
+
+        else:
+            cents = 100*int(text[:index])
+            text = text[index+1:]
+
+            if len(text) == 0:
+                pass
+
+            elif len(text) == 1:
+                cents += 10*int(text)
+
+            else:
+                cents += int(text[:2])
+                pass
+
+            pass
+
+        self.value = cents
+        self.edit_text = cash_string(cents)
+        self.change_cb()
+        return
+
+
+    def clear(self):
+        self.value = None
+        self.edit_text = ''
+        return
+
+    pass
+
+
+# initial_balance()-- This widget stores the initial balance of the
+# register.
+
+class initial_balance(cash_entry):
+
+    def __init__(self, parent, value):
+        self.parent = parent
+        super().__init__(edit_text='', align='right')
+
+        self.set_value(value)
+        return
+
+    def change_cb(self):
+        self.parent.update_balance()
+        return
+
+    def set_value(self, value):
+        self.value = value
+        self.set_edit_text(cash_string(value))
+        return
+
+    pass
+
+
+# row_payment()-- This widget stores the value of a payment (debit).
+
+class row_payment(cash_entry):
+    def __init__(self, parent, value):
+        self.parent = parent
+        super().__init__(edit_text=cash_string(value), align='right')
+        return
+
+    def change_cb(self):
+        self.parent.credit.clear()
+        self.parent.value = self.value
+        self.parent.parent.update_balance()
+        return
+
+    pass
+
+
+# row_credit()-- This widget stores the value of a credit.
+
+class row_credit(cash_entry):
+    def __init__(self, parent, value):
+        self.parent = parent
+        super().__init__(edit_text=cash_string(value), align='right')
+        return
+
+    def change_cb(self):
+        self.parent.payment.clear()
+        self.parent.value = -self.value
+        self.parent.parent.update_balance()
+        return
+
+    pass
+
+
+# row_balance()-- This widget shows the balance.  It is strictly an
+# output.
+
+class row_balance(urwid.Text):
+    def __init__(self, parent):
+        self.parent = parent
+        super().__init__('', align='right')
+        return
+
+    def show_value(self, value):
+        self.set_text('\n' + cash_string(value))
+        return
+
+    pass
+
+
+# register_row()-- This represents a row of the register.
+
+class register_row(urwid.Columns):
+    def __init__(self, parent, date, desc, value):
+        if date is None:
+            now = time.localtime()
+            now = '%d/%d' % (now.tm_mon, now.tm_mday)
+            date = time.strftime(now)
+            pass
+
+        self.parent = parent
+        self.value = value
+
+        self.date = row_date(date)
+        self.desc = row_desc(self, desc)
+        self.flag = row_flag(self)
+
+        if value == 0:
+            self.payment = row_payment(self, None)
+            self.credit = row_credit(self, None)
+
+        elif value < 0:
+            self.payment = row_payment(self, None)
+            self.credit = row_credit(self, -value)
+
+        else:
+            self.payment = row_payment(self, value)
+            self.credit = row_credit(self, None)
+            pass
+
+        self.balance = row_balance(self)
+
+        widgets = build_row(self.date, self.desc, self.flag, self.payment,
+                            self.credit, self.balance)
+        super().__init__(widgets)
+        return
+
+
+# update_balance()-- Given an initial balance, update it, display it
+# and return it for the next line.
+
+    def update_balance(self, value):
+        value += self.value
+
+        self.balance.show_value(value)
+        return value
+
+    pass
+
+
+# register_main()-- This represents the whole register.
+
+class register_main(urwid.ListBox):
+
+    def __init__(self):
+        self.initial_balance = initial_balance(self, 0)
+
+        initial = build_row(urwid.Text(''), urwid.Text(''), urwid.Text(''),
+                            urwid.Text(''), urwid.Text(''),
+                            self.initial_balance)
+
+        elements = [ urwid.Columns(initial) ] + self.load_register()
+        walker = urwid.SimpleFocusListWalker(elements)
+        super().__init__(walker)
+
+        self.color_rows()
+        self.update_balance()
+        return
+
+
+# update_balance()-- Recalculate balances.  The first widget in the
+# walker contains the initial balance.
+
+    def update_balance(self):
+        value = self.initial_balance.value
+
+        for w in self.body[1:]:
+            value = w.original_widget.update_balance(value)
+            pass
+
+        return
+
+
+    def keypress(self, size, key):
+        if key == 'ctrl n':   # New row
+            self.new_row = register_row(self, None, '', 0)
+            self.body.append(self.new_row)
+            self.color_rows()
+            self.body.set_focus(len(self.body) - 1)
+            return None
+
+        if key == 'delete':   # Delete row
+            if self.focus_position > 0:
+                del self.body[self.focus_position]
+                self.update_balance()
+                pass
+
+            self.color_rows()
+            return None
+
+        if key == 'ctrl u':   # Move row up
+            if self.focus_position > 1:
+                n = self.focus_position - 1
+                row = self.body[n]
+                del self.body[n]
+                self.body.insert(n+1, row)
+
+                self.update_balance()
+                self.color_rows()
+                self.set_focus(n)
+                pass
+
+            return None
+
+        if key == 'ctrl d':   # Move row down
+            if self.focus_position < len(self.body) - 1:
+                n = self.focus_position
+                row = self.body[n+1]
+                del self.body[n+1]
+                self.body.insert(n, row)
+
+                self.update_balance()
+                self.color_rows()
+                self.set_focus(n+1)
+                pass
+
+            return None
+
+        if key == 'ctrl x':   # Exit
+            self.save_register()
+            raise SystemExit
+
+        return super().keypress(size, key)
+
+
+# open_file()-- Throws a FileNotFound error if the file does not exist.
+
+    def open_file(self, mode):
+        path = os.path.split(sys.argv[0])[0]
+        path = os.path.join(path, 'register.db')
+
+        return open(path, mode)
+
+
+# load_register()-- Load the register from disk.
+
+    def load_register(self):
+        try:
+            fd = self.open_file('r')
+
+        except FileNotFoundError:
+            return []
+
+        self.initial_balance.set_value(int(fd.readline()))
+
+        result = []
+        line_num = 2
+
+        for line in fd:
+            data = line.split(' ', maxsplit=2)
+
+            if len(data) == 3:
+                day, value, desc = data
+
+            elif len(data) == 2:
+                day, value = data
+                desc = ''
+
+            else:
+                raise SystemExit('Bad database in line %d' % line_num)
+
+            result.append(register_row(self, day, desc, int(value)))
+            line_num += 1
+            pass
+
+        return result
+
+
+# save_registger()-- Save the register, removing reconciled rows.
+
+    def save_register(self):
+        value = self.initial_balance.value
+
+        for w in self.body[1:]:
+            if w.original_widget.flag.state:
+                value += w.original_widget.value
+                pass
+
+            pass
+
+        fd = self.open_file('w')
+        print(value, file=fd)
+
+        for w in self.body[1:]:
+            w = w.original_widget
+
+            if not w.flag.state:
+                date = w.date.get_edit_text().strip()
+                if date == '':
+                    date = '???'
+                    pass
+
+                desc = w.desc.get_edit_text().strip()
+                print(date, w.value, desc, file=fd)
+                pass
+
+            pass
+
+        fd.close()
+        return
+
+
+# color_rows()-- Color the rows in alternating background colors to
+# highlight the differences between lines.
+
+    def color_rows(self):
+        result = []
+        flag = True
+
+        for w in self.body:
+            attr = 'P1' if flag else 'P2'
+            flag = not flag
+
+            if isinstance(w, urwid.AttrMap):
+                w = urwid.AttrMap(w.original_widget, attr)
+            else:
+                w = urwid.AttrMap(w, attr);
+                pass
+
+            result.append(w)
+            pass
+
+        self.body = result
+        return
+
+    pass
+
+
+
+## Main script starts here
+
+palette = [
+    ( 'P1', 'white', 'dark green' ),
+    ( 'P2', 'white', 'dark blue'  ),
+    ]
+
+title_row = build_row(urwid.Text('Date'), urwid.Text('Transaction'),
+                      urwid.Text(' X'), urwid.Text('Credit', align='right'),
+                      urwid.Text('Payment', align='right'),
+                      urwid.Text('Balance', align='right'))
+
+header = urwid.Pile([
+    urwid.Text('Check Register', align='center'),
+    urwid.Columns(title_row),
+    urwid.Divider('-') ])
+
+lines = register_main()
+
+frame = urwid.Frame(lines, header)
+main = urwid.MainLoop(frame, palette)
+
+try:
+    main.run()
+
+except KeyboardInterrupt:
+    pass
